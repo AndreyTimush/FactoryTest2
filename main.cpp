@@ -1,35 +1,39 @@
 #include <QCoreApplication>
 #include <QFile>
-#include <QTextStream>
 #include <QDebug>
 #include <QtConcurrent>
 #include <QFuture>
-#include <QMutex>
+#include <QThreadPool>
 
 struct ChunkResult {
     qint64 sum = 0;
     qint64 diff = 0;
-    int xorResult = 0;
+    quint64 xorResult = 0;
     bool isFirst = true;
 };
 
-ChunkResult processChunk(const QStringList &parts) {
+ChunkResult processChunk(const QByteArray &chunkData) {
     ChunkResult res;
-    for (const QString &p : parts) {
-        bool ok;
-        qint64 number = p.toLongLong(&ok);
-        if (!ok) continue;
+    qint64 number = 0;
+    bool hasNum = false;
 
-        if (res.isFirst) {
-            res.diff = number;
-            res.isFirst = false;
-        } else {
-            res.diff -= number;
+    for (char c : chunkData) {
+        if (c >= '0' && c <= '9') {
+            number = number * 10 + (c - '0');
+            hasNum = true;
+        } else if (hasNum) {
+            res.sum += number;
+            res.xorResult ^= static_cast<quint64>(number);
+            number = 0;
+            hasNum = false;
         }
-
-        res.sum += number;
-        res.xorResult ^= static_cast<int>(number);
     }
+
+    if (hasNum) {
+        res.sum += number;
+        res.xorResult ^= static_cast<quint64>(number);
+    }
+
     return res;
 }
 
@@ -42,50 +46,64 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    QTextStream in(&file);
-    const int SIZE_CHUNK = 1024 * 1024; // Размер чанка
-    QString buffer; // Буфер для неполных чисел на границе чанка
+    QThreadPool::globalInstance()->setMaxThreadCount(3);
+
+    const qint64 CHUNK_SIZE = 1024 * 1024; // Размер чанка
+    QByteArray buffer; // Буфер для неполных чисел на границе чанка
+    buffer.reserve(CHUNK_SIZE);
 
     QList<QFuture<ChunkResult>> futures;
 
-    while (!in.atEnd()) {
-        // Читаем блок данных 1МБ
-        QString chunk = buffer + in.read(SIZE_CHUNK);
-        // Находим последний пробел/перевод строки
-        int lastSpace = chunk.lastIndexOf(QRegExp("\\s"));
+    qint64 firstNumber = 0;
+    bool firstNumberFound = false;
 
-        // Если нашли, сохраняем остаток в буфер
-        if (lastSpace != -1 && !in.atEnd()) {
+    while (!file.atEnd()) {
+        QByteArray chunk = buffer + file.read(CHUNK_SIZE);
+        qint64 lastSpace = chunk.lastIndexOf(' ');
+
+        if (!firstNumberFound) {
+            qint64 number = 0;
+            bool hasNum = false;
+            for (char c : chunk) {
+                if (c >= '0' && c <= '9') {
+                    number = number * 10 + (c - '0');
+                    hasNum = true;
+                } else if (hasNum) {
+                    firstNumber = number;
+                    firstNumberFound = true;
+                    break; // нашли первое число — выходим
+                }
+            }
+            if (!firstNumberFound && hasNum) {
+                firstNumber = number;
+                firstNumberFound = true;
+            }
+        }
+
+        if (lastSpace != -1 && !file.atEnd()) {
             buffer = chunk.mid(lastSpace + 1);
-            chunk = chunk.left(lastSpace);
+            chunk.truncate(lastSpace + 1);
         } else {
             buffer.clear();
         }
 
-        // Парсим числа из текущего чанка
-        QStringList parts = chunk.split(QRegExp("\\s+"), Qt::SkipEmptyParts);
-
-        futures.append(QtConcurrent::run(processChunk, parts));
+        futures.append(QtConcurrent::run(processChunk, chunk));
     }
 
     file.close();
 
     qint64 totalSum = 0;
-    qint64 totalDiff = 0;
-    int totalXor = 0;
-    bool firstChunk = true;
+    qint64 totalDiff = firstNumber;
+    quint64 totalXor = 0;
 
     for (auto &f : futures) {
         ChunkResult r = f.result();
         totalSum += r.sum;
         totalXor ^= r.xorResult;
-        if (firstChunk) {
-            totalDiff = r.diff;
-            firstChunk = false;
-        } else {
-            totalDiff -= r.sum;
-        }
+        totalDiff -= r.sum;
     }
+
+    totalDiff += firstNumber;
 
     qDebug() << "Результат суммы всех чисел:" << totalSum;
     qDebug() << "Результат вычитания из первого числа:" << totalDiff;
