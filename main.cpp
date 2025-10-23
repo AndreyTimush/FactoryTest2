@@ -2,6 +2,36 @@
 #include <QFile>
 #include <QTextStream>
 #include <QDebug>
+#include <QtConcurrent>
+#include <QFuture>
+#include <QMutex>
+
+struct ChunkResult {
+    qint64 sum = 0;
+    qint64 diff = 0;
+    int xorResult = 0;
+    bool isFirst = true;
+};
+
+ChunkResult processChunk(const QStringList &parts) {
+    ChunkResult res;
+    for (const QString &p : parts) {
+        bool ok;
+        qint64 number = p.toLongLong(&ok);
+        if (!ok) continue;
+
+        if (res.isFirst) {
+            res.diff = number;
+            res.isFirst = false;
+        } else {
+            res.diff -= number;
+        }
+
+        res.sum += number;
+        res.xorResult ^= static_cast<int>(number);
+    }
+    return res;
+}
 
 int main(int argc, char *argv[])
 {
@@ -13,21 +43,14 @@ int main(int argc, char *argv[])
     }
 
     QTextStream in(&file);
-
-    // Переменные для накопления результатов
-    qint64 sum = 0;
-    qint64 diff = 0;
-    int xorResult = 0;
-    bool isFirstNumber = true;
-    bool hasNumbers = false;
-
     const int SIZE_CHUNK = 1024 * 1024; // Размер чанка
     QString buffer; // Буфер для неполных чисел на границе чанка
+
+    QList<QFuture<ChunkResult>> futures;
 
     while (!in.atEnd()) {
         // Читаем блок данных 1МБ
         QString chunk = buffer + in.read(SIZE_CHUNK);
-
         // Находим последний пробел/перевод строки
         int lastSpace = chunk.lastIndexOf(QRegExp("\\s"));
 
@@ -42,63 +65,31 @@ int main(int argc, char *argv[])
         // Парсим числа из текущего чанка
         QStringList parts = chunk.split(QRegExp("\\s+"), Qt::SkipEmptyParts);
 
-        for (const QString &p : parts) {
-            bool ok;
-            qint64 number = p.toLongLong(&ok);
-
-            if (!ok) continue;
-
-            hasNumbers = true;
-
-            // Сумма
-            sum += number;
-
-            // Разность
-            if (isFirstNumber) {
-                diff = number;
-                isFirstNumber = false;
-            } else {
-                diff -= number;
-            }
-
-            // XOR
-            xorResult ^= static_cast<int>(number);
-        }
-    }
-
-    // Обрабатываем остаток в буфере
-    if (!buffer.isEmpty()) {
-        QStringList parts = buffer.split(QRegExp("\\s+"), Qt::SkipEmptyParts);
-        for (const QString &p : parts) {
-            bool ok;
-            qint64 number = p.toLongLong(&ok);
-
-            if (!ok) continue;
-
-            hasNumbers = true;
-            sum += number;
-
-            if (isFirstNumber) {
-                diff = number;
-                isFirstNumber = false;
-            } else {
-                diff -= number;
-            }
-
-            xorResult ^= static_cast<int>(number);
-        }
+        futures.append(QtConcurrent::run(processChunk, parts));
     }
 
     file.close();
 
-    if (!hasNumbers) {
-        qWarning() << "Файл пустой или не содержит чисел!";
-        return -1;
+    qint64 totalSum = 0;
+    qint64 totalDiff = 0;
+    int totalXor = 0;
+    bool firstChunk = true;
+
+    for (auto &f : futures) {
+        ChunkResult r = f.result();
+        totalSum += r.sum;
+        totalXor ^= r.xorResult;
+        if (firstChunk) {
+            totalDiff = r.diff;
+            firstChunk = false;
+        } else {
+            totalDiff -= r.sum;
+        }
     }
 
-    qDebug() << "Результат суммы всех чисел:" << sum;
-    qDebug() << "Результат вычитания из первого числа:" << diff;
-    qDebug() << "Результат XOR:" << xorResult;
+    qDebug() << "Результат суммы всех чисел:" << totalSum;
+    qDebug() << "Результат вычитания из первого числа:" << totalDiff;
+    qDebug() << "Результат XOR:" << totalXor;
 
     return 0;
 }
